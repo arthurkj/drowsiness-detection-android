@@ -1,0 +1,246 @@
+package br.com.unisinos.drowsiness // Ajuste para o pacote do seu projeto
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
+import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.util.Log
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.google.mediapipe.framework.image.MPImage
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListener {
+
+    private lateinit var viewFinder: PreviewView
+    private lateinit var tvEar: TextView
+    private lateinit var tvStatus: TextView
+    private lateinit var mainLayout: ConstraintLayout
+
+    private lateinit var cameraExecutor: ExecutorService
+    private var helper: FaceLandmarkerHelper? = null
+    private val analyzer = DrowsinessAnalyzer()
+
+    // --- COMPONENTES DE ÁUDIO E VIBRAÇÃO ---
+    private var toneGenerator: ToneGenerator? = null
+    private var vibrator: Vibrator? = null
+    private var isAlertOn: Boolean = false
+
+    companion object {
+        private const val CAMERA_PERMISSION_REQUEST = 100
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        viewFinder = findViewById(R.id.viewFinder)
+        tvEar = findViewById(R.id.tvEar)
+        tvStatus = findViewById(R.id.tvStatus)
+        mainLayout = findViewById(R.id.mainLayout)
+
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // Inicialização do Gerador de Som e do Motor Tátil
+        initializeAlertComponents()
+
+        if (allPermissionsGranted()) {
+            startCameraAndDetector()
+        } else {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.CAMERA),
+                CAMERA_PERMISSION_REQUEST
+            )
+        }
+    }
+
+    private fun initializeAlertComponents() {
+        try {
+            // Bipe contínuo em volume máximo
+            toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+
+            // Tratamento de compatibilidade da API de Vibração (Android 12+ vs versões anteriores)
+            vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                vibratorManager.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Erro ao inicializar alertas sonoros/táteis", e)
+        }
+    }
+
+    private fun startCameraAndDetector() {
+        helper = FaceLandmarkerHelper(this, this)
+
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(viewFinder.surfaceProvider)
+            }
+
+            val imageAnalyzer = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .build()
+                .also { analysis ->
+                    analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                        val bitmap = imageProxy.toBitmap()
+                        helper?.detectLiveStream(bitmap)
+                        imageProxy.close()
+                    }
+                }
+
+            val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(
+                    this,
+                    cameraSelector,
+                    preview,
+                    imageAnalyzer
+                )
+            } catch (exc: Exception) {
+                Log.e("MainActivity", "Erro ao iniciar CameraX", exc)
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    // --- CALLBACKS DO MEDIAPIPE ---
+
+    override fun onResults(result: FaceLandmarkerResult, inputImage: MPImage) {
+        runOnUiThread {
+            val faceLandmarks = result.faceLandmarks()
+
+            if (!faceLandmarks.isNullOrEmpty()) {
+                val landmarks = faceLandmarks[0]
+                val res = analyzer.processFrames(landmarks)
+
+                tvEar.text = String.format("EAR: %.2f", res.averageEar)
+
+                if (res.isAlertOn) {
+                    tvStatus.text = "!!! ALERTA: SONOLÊNCIA DETECTADA !!!"
+                    tvStatus.setTextColor(Color.RED)
+                    mainLayout.setBackgroundColor(Color.RED)
+
+                    triggerAlerts()
+                } else {
+                    stopAlerts()
+
+                    if (res.averageEar < DrowsinessAnalyzer.EAR_THRESHOLD) {
+                        tvStatus.text = "Fechado (${res.framesCount}/${DrowsinessAnalyzer.FRAMES_THRESHOLD})"
+                        tvStatus.setTextColor(Color.YELLOW)
+                        mainLayout.setBackgroundColor(Color.BLACK)
+                    } else {
+                        tvStatus.text = "Atento / Olhos Abertos"
+                        tvStatus.setTextColor(Color.GREEN)
+                        mainLayout.setBackgroundColor(Color.BLACK)
+                    }
+                }
+            } else {
+                analyzer.reset()
+                stopAlerts()
+                tvEar.text = "EAR: --"
+                tvStatus.text = "Aviso: Rosto Nao Detectado"
+                tvStatus.setTextColor(Color.GRAY)
+                mainLayout.setBackgroundColor(Color.BLACK)
+            }
+        }
+    }
+
+    // --- LÓGICA DE CONTROLE DO SOM E VIBRAÇÃO ---
+
+    private fun triggerAlerts() {
+        if (!isAlertOn) {
+            isAlertOn = true
+
+            // Som de Alarme de Alta Frequência (Toca continuamente no canal de Alarme)
+            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 5000)
+
+            // Vibração Contínua (Padrão em Loop: Espera 0ms, Vibra 500ms, Pausa 200ms)
+            vibrator?.let { v ->
+                if (v.hasVibrator()) {
+                    val timings = longArrayOf(0, 500, 200) // Padrão [espera, vibração, pausa]
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        // O índice '0' indica para repetir em loop a partir da posição 0 do vetor
+                        v.vibrate(VibrationEffect.createWaveform(timings, 0))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        v.vibrate(timings, 0)
+                    }
+                }
+            }
+        } else {
+            // Se já está em alerta e o tom de 5s expirou, renova o disparo do tom enquanto durar o estado
+            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 5000)
+        }
+    }
+
+    private fun stopAlerts() {
+        if (isAlertOn) {
+            isAlertOn = false
+
+            toneGenerator?.stopTone()
+            vibrator?.cancel()
+        }
+    }
+
+    override fun onError(error: String) {
+        runOnUiThread {
+            Toast.makeText(this, error, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(
+        baseContext, Manifest.permission.CAMERA
+    ) == PackageManager.PERMISSION_GRANTED
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            if (allPermissionsGranted()) {
+                startCameraAndDetector()
+            } else {
+                Toast.makeText(this, "Permissão de câmera negada.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopAlerts()
+        toneGenerator?.release()
+        toneGenerator = null
+        cameraExecutor.shutdown()
+        helper?.clear()
+    }
+}

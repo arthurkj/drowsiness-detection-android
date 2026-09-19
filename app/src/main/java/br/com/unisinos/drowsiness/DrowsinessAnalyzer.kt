@@ -16,20 +16,38 @@ class DrowsinessAnalyzer {
         private val LEFT_EYE_INDEX = intArrayOf(33, 160, 158, 133, 153, 144)
         private val RIGHT_EYE_INDEX = intArrayOf(362, 385, 387, 263, 373, 380)
 
+        // Mapeamento dos 4 índices do EAR
+        // [0] -> Lábio superior interno
+        // [1] -> Lábio inferior interno
+        // [2] -> Canto esquerdo
+        // [3] -> Canto direito
+        private val MOUTH_INDEX = intArrayOf(13, 14, 78, 308)
+
         // Limiares PERCLOS e amostragem de 30 FPS (0,5s)
         const val EAR_THRESHOLD = 0.21f
-        const val FRAMES_THRESHOLD = 15
+        const val EYES_FRAMES_THRESHOLD = 15
+
+        // Limiares MAR e amostragem de 30 FPS (3s)
+        const val MAR_THRESHOLD = 0.60f // Ponto de corte para abertura crítica da boca
+        const val MOUTH_FRAMES_THRESHOLD = 90
     }
 
     // Classe DTO com resultado da análise
     data class ProcessResult(
         val averageEar: Float,
-        val framesCount: Int,
-        val isAlertOn: Boolean
+        val currentMar: Float,
+        val eyesFramesCount: Int,
+        val mouthFramesCount: Int,
+        val isEyesAlertOn: Boolean,
+        val isMouthAlertOn: Boolean
     )
 
-    private var framesCount = 0
-    var isAlertOn = false
+    private var eyesFramesCount = 0
+    var isEyesAlertOn = false
+        private set
+
+    private var mouthFramesCount = 0
+    var isMouthAlertOn = false
         private set
 
     // Cálculo de distância euclidiana
@@ -60,31 +78,66 @@ class DrowsinessAnalyzer {
         return (v1 + v2) / (2.0f * h)
     }
 
+    private fun calculateMar(landmarks: List<NormalizedLandmark>): Float {
+        if (landmarks.size < 400) return 0.0f
+
+        val top = landmarks[MOUTH_INDEX[0]]
+        val bottom = landmarks[MOUTH_INDEX[1]]
+        val left = landmarks[MOUTH_INDEX[2]]
+        val right = landmarks[MOUTH_INDEX[3]]
+
+        val verticalOpening = calculateDistance(top, bottom)
+        val horizontalWidth = calculateDistance(left, right)
+
+        if (horizontalWidth == 0.0f) return 0.0f
+
+        return verticalOpening / horizontalWidth
+    }
+
     // Função chamada a cada quadro da câmera
     fun processFrames(landmarks: List<NormalizedLandmark>): ProcessResult {
         val leftEar = calculateEar(landmarks, LEFT_EYE_INDEX)
         val rightEar = calculateEar(landmarks, RIGHT_EYE_INDEX)
         val averageEar = (leftEar + rightEar) / 2.0f
 
+        // Processamento dos Olhos
         if (averageEar < EAR_THRESHOLD) {
-            framesCount++
-            if (framesCount >= FRAMES_THRESHOLD) {
-                isAlertOn = true
+            this@DrowsinessAnalyzer.eyesFramesCount++
+            if (this@DrowsinessAnalyzer.eyesFramesCount >= EYES_FRAMES_THRESHOLD) {
+                isEyesAlertOn = true
             }
         } else {
-            framesCount = 0
-            isAlertOn = false
+            this@DrowsinessAnalyzer.eyesFramesCount = 0
+            isEyesAlertOn = false
+        }
+
+        // Processamento da boca
+        val currentMar = calculateMar(landmarks)
+
+        if (currentMar >= MAR_THRESHOLD) {
+            mouthFramesCount++
+            if (mouthFramesCount >= MOUTH_FRAMES_THRESHOLD) {
+                isMouthAlertOn = true
+            }
+        } else {
+            mouthFramesCount = 0
+            isMouthAlertOn = false
         }
 
         return ProcessResult(
             averageEar = averageEar,
-            framesCount = framesCount,
-            isAlertOn = isAlertOn
+            currentMar = currentMar,
+            eyesFramesCount = eyesFramesCount,
+            mouthFramesCount= mouthFramesCount,
+            isEyesAlertOn = isEyesAlertOn,
+            isMouthAlertOn = isMouthAlertOn,
         )
     }
 
     fun reset() {
-        framesCount = 0
-        isAlertOn = false
+        eyesFramesCount = 0
+        isEyesAlertOn = false
+        mouthFramesCount = 0
+        isMouthAlertOn = false
     }
 }

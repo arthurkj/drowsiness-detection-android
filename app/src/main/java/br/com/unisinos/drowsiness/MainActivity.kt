@@ -31,8 +31,11 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListener {
 
     private lateinit var viewFinder: PreviewView
-    private lateinit var tvEar: TextView
-    private lateinit var tvStatus: TextView
+    private lateinit var tvEarValue: TextView
+    private lateinit var tvEarStatus: TextView
+    private lateinit var tvMarValue: TextView
+    private lateinit var tvMarStatus: TextView
+    private lateinit var tvGeneralStatus: TextView
     private lateinit var mainLayout: ConstraintLayout
 
     private lateinit var cameraExecutor: ExecutorService
@@ -53,8 +56,11 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
         setContentView(R.layout.activity_main)
 
         viewFinder = findViewById(R.id.viewFinder)
-        tvEar = findViewById(R.id.tvEar)
-        tvStatus = findViewById(R.id.tvStatus)
+        tvEarValue = findViewById(R.id.tvEarValue)
+        tvEarStatus = findViewById(R.id.tvEarStatus)
+        tvMarValue = findViewById(R.id.tvMarValue)
+        tvMarStatus = findViewById(R.id.tvMarStatus)
+        tvGeneralStatus = findViewById(R.id.tvGeneralStatus)
         mainLayout = findViewById(R.id.mainLayout)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -140,33 +146,61 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 val landmarks = faceLandmarks[0]
                 val res = analyzer.processFrames(landmarks)
 
-                tvEar.text = String.format("EAR: %.2f", res.averageEar)
-
-                if (res.isAlertOn) {
-                    tvStatus.text = "!!! ALERTA: SONOLÊNCIA DETECTADA !!!"
-                    tvStatus.setTextColor(Color.RED)
-                    mainLayout.setBackgroundColor(Color.RED)
-
-                    triggerAlerts()
+                // 1. Atualização da Caixa 1 (EAR / Olhos)
+                tvEarValue.text = String.format("EAR: %.2f", res.averageEar)
+                if (res.averageEar < DrowsinessAnalyzer.EAR_THRESHOLD) {
+                    tvEarStatus.text = "Fechado (${res.eyesFramesCount}/${DrowsinessAnalyzer.EYES_FRAMES_THRESHOLD})"
+                    tvEarStatus.setTextColor(Color.YELLOW)
                 } else {
+                    tvEarStatus.text = "Aberto / Normal"
+                    tvEarStatus.setTextColor(Color.GREEN)
+                }
+
+                // 2. Atualização da Caixa 2 (MAR / Boca)
+                tvMarValue.text = String.format("MAR: %.2f", res.currentMar)
+                if (res.currentMar >= DrowsinessAnalyzer.MAR_THRESHOLD) {
+                    tvMarStatus.text = "Aberta (${res.mouthFramesCount}/${DrowsinessAnalyzer.MOUTH_FRAMES_THRESHOLD})"
+                    tvMarStatus.setTextColor(Color.YELLOW)
+                } else {
+                    tvMarStatus.text = "Normal"
+                    tvMarStatus.setTextColor(Color.GREEN)
+                }
+
+                // 3. Atualização do Banner de Status Geral e Alertas
+                if (res.isEyesAlertOn) {
+                    tvGeneralStatus.text = "!!! ALERTA: MICRO-COCHILO DETECTADO (EAR) !!!"
+                    tvGeneralStatus.setTextColor(Color.RED)
+                    mainLayout.setBackgroundColor(Color.RED)
+                    triggerAlerts()
+
+                } else if (res.isMouthAlertOn) {
+                    tvGeneralStatus.text = "AVISO: BOCEJO LONGO DETECTADO"
+                    tvGeneralStatus.setTextColor(Color.YELLOW)
+                    mainLayout.setBackgroundColor(Color.DKGRAY)
                     stopAlerts()
 
-                    if (res.averageEar < DrowsinessAnalyzer.EAR_THRESHOLD) {
-                        tvStatus.text = "Fechado (${res.framesCount}/${DrowsinessAnalyzer.FRAMES_THRESHOLD})"
-                        tvStatus.setTextColor(Color.YELLOW)
-                        mainLayout.setBackgroundColor(Color.BLACK)
-                    } else {
-                        tvStatus.text = "Atento / Olhos Abertos"
-                        tvStatus.setTextColor(Color.GREEN)
-                        mainLayout.setBackgroundColor(Color.BLACK)
-                    }
+                } else {
+                    tvGeneralStatus.text = "SISTEMA ATENTO / OK"
+                    tvGeneralStatus.setTextColor(Color.GREEN)
+                    mainLayout.setBackgroundColor(Color.BLACK)
+                    stopAlerts()
                 }
+
             } else {
+                // Rosto ausente / perdido
                 analyzer.reset()
                 stopAlerts()
-                tvEar.text = "EAR: --"
-                tvStatus.text = "Aviso: Rosto Nao Detectado"
-                tvStatus.setTextColor(Color.GRAY)
+
+                tvEarValue.text = "EAR: --"
+                tvEarStatus.text = "Sem Rosto"
+                tvEarStatus.setTextColor(Color.GRAY)
+
+                tvMarValue.text = "MAR: --"
+                tvMarStatus.text = "Sem Rosto"
+                tvMarStatus.setTextColor(Color.GRAY)
+
+                tvGeneralStatus.text = "Aviso: Rosto Nao Detectado"
+                tvGeneralStatus.setTextColor(Color.GRAY)
                 mainLayout.setBackgroundColor(Color.BLACK)
             }
         }

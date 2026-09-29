@@ -25,7 +25,7 @@ class DrowsinessAnalyzer {
 
         // Limiares PERCLOS e amostragem de 30 FPS (0,5s)
         const val EAR_THRESHOLD = 0.21f
-        const val EYES_FRAMES_THRESHOLD = 15
+        const val EYES_FRAMES_THRESHOLD = 20
 
         // Limiares MAR e amostragem de 30 FPS (3s)
         const val MAR_THRESHOLD = 0.60f // Ponto de corte para abertura crítica da boca

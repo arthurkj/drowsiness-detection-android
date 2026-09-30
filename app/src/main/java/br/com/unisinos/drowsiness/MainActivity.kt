@@ -12,6 +12,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -25,6 +26,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -36,6 +38,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
     private lateinit var tvMarValue: TextView
     private lateinit var tvMarStatus: TextView
     private lateinit var tvGeneralStatus: TextView
+    private lateinit var btnRecalibrate: Button
     private lateinit var mainLayout: ConstraintLayout
 
     private lateinit var cameraExecutor: ExecutorService
@@ -62,6 +65,17 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
         tvMarStatus = findViewById(R.id.tvMarStatus)
         tvGeneralStatus = findViewById(R.id.tvGeneralStatus)
         mainLayout = findViewById(R.id.mainLayout)
+        btnRecalibrate = findViewById(R.id.btnRecalibrate)
+
+        btnRecalibrate.setOnClickListener {
+            analyzer.recalibrate()
+            stopAlerts()
+            Toast.makeText(
+                this,
+                "Calibração reiniciada. Olhe fixamente para a frente!",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
 
@@ -84,7 +98,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
             // Bipe contínuo em volume máximo
             toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 100)
 
-            // Tratamento de compatibilidade da API de Vibração (Android 12+ vs versões anteriores)
+            // Tratamento de compatibilidade da API de Vibração
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
                 vibratorManager.defaultVibrator
@@ -146,18 +160,31 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 val landmarks = faceLandmarks[0]
                 val res = analyzer.processFrames(landmarks)
 
-                // 1. Atualização da Caixa 1 (EAR / Olhos)
-                tvEarValue.text = String.format("EAR: %.2f", res.averageEar)
-                if (res.averageEar < DrowsinessAnalyzer.EAR_THRESHOLD) {
+                // 1. Atualização da Caixa 1 (EAR / Olhos e Calibração Adaptativa)
+                tvEarValue.text = String.format(
+                    Locale.US,
+                    "EAR: %.2f (Lim: %.2f)",
+                    res.averageEar,
+                    res.currentEarThreshold
+                )
+
+                if (res.isCalibrating) {
+                    tvEarStatus.text = "Calibrando... Olhe para a frente"
+                    tvEarStatus.setTextColor(Color.YELLOW)
+                } else if (res.averageEar < res.currentEarThreshold) {
                     tvEarStatus.text = "Fechado (${res.eyesFramesCount}/${DrowsinessAnalyzer.EYES_FRAMES_THRESHOLD})"
                     tvEarStatus.setTextColor(Color.YELLOW)
                 } else {
-                    tvEarStatus.text = "Aberto / Normal"
+                    tvEarStatus.text = String.format(
+                        Locale.US,
+                        "Aberto (Base: %.2f)",
+                        res.baseEarCalculated
+                    )
                     tvEarStatus.setTextColor(Color.GREEN)
                 }
 
                 // 2. Atualização da Caixa 2 (MAR / Boca)
-                tvMarValue.text = String.format("MAR: %.2f", res.currentMar)
+                tvMarValue.text = String.format(Locale.US, "MAR: %.2f", res.currentMar)
                 if (res.currentMar >= DrowsinessAnalyzer.MAR_THRESHOLD) {
                     tvMarStatus.text = "Aberta (${res.mouthFramesCount}/${DrowsinessAnalyzer.MOUTH_FRAMES_THRESHOLD})"
                     tvMarStatus.setTextColor(Color.YELLOW)
@@ -167,7 +194,13 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 }
 
                 // 3. Atualização do Banner de Status Geral e Alertas
-                if (res.isEyesAlertOn) {
+                if (res.isCalibrating) {
+                    tvGeneralStatus.text = "CALIBRANDO SISTEMA... AGUARDE (3s)"
+                    tvGeneralStatus.setTextColor(Color.YELLOW)
+                    mainLayout.setBackgroundColor(Color.BLACK)
+                    stopAlerts()
+
+                } else if (res.isEyesAlertOn) {
                     tvGeneralStatus.text = "!!! ALERTA: MICRO-COCHILO DETECTADO (EAR) !!!"
                     tvGeneralStatus.setTextColor(Color.RED)
                     mainLayout.setBackgroundColor(Color.RED)
@@ -212,16 +245,15 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
         if (!isAlertOn) {
             isAlertOn = true
 
-            // Som de Alarme de Alta Frequência (Toca continuamente no canal de Alarme)
+            // Som de Alarme de Alta Frequência
             toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 5000)
 
-            // Vibração Contínua (Padrão em Loop: Espera 0ms, Vibra 500ms, Pausa 200ms)
+            // Vibração Contínua
             vibrator?.let { v ->
                 if (v.hasVibrator()) {
-                    val timings = longArrayOf(0, 500, 200) // Padrão [espera, vibração, pausa]
+                    val timings = longArrayOf(0, 500, 200)
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        // O índice '0' indica para repetir em loop a partir da posição 0 do vetor
                         v.vibrate(VibrationEffect.createWaveform(timings, 0))
                     } else {
                         @Suppress("DEPRECATION")
@@ -230,7 +262,6 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 }
             }
         } else {
-            // Se já está em alerta e o tom de 5s expirou, renova o disparo do tom enquanto durar o estado
             toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 5000)
         }
     }

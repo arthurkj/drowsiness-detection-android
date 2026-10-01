@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
     private lateinit var tvMarStatus: TextView
     private lateinit var tvGeneralStatus: TextView
     private lateinit var btnRecalibrate: Button
+    private lateinit var tvFpsValue: TextView
     private lateinit var mainLayout: ConstraintLayout
 
     private lateinit var cameraExecutor: ExecutorService
@@ -66,6 +67,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
         tvGeneralStatus = findViewById(R.id.tvGeneralStatus)
         mainLayout = findViewById(R.id.mainLayout)
         btnRecalibrate = findViewById(R.id.btnRecalibrate)
+        tvFpsValue = findViewById(R.id.tvFpsValue)
 
         btnRecalibrate.setOnClickListener {
             analyzer.recalibrate()
@@ -160,6 +162,12 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 val landmarks = faceLandmarks[0]
                 val res = analyzer.processFrames(landmarks)
 
+                if (res.isCalibrating) {
+                    tvFpsValue.text = "FPS: Medindo..."
+                } else {
+                    tvFpsValue.text = String.format(Locale.US, "FPS: %.1f", res.measuredFps)
+                }
+
                 // 1. Atualização da Caixa 1 (EAR / Olhos e Calibração Adaptativa)
                 tvEarValue.text = String.format(
                     Locale.US,
@@ -172,7 +180,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                     tvEarStatus.text = "Calibrando... Olhe para a frente"
                     tvEarStatus.setTextColor(Color.YELLOW)
                 } else if (res.averageEar < res.currentEarThreshold) {
-                    tvEarStatus.text = "Fechado (${res.eyesFramesCount}/${DrowsinessAnalyzer.EYES_FRAMES_THRESHOLD})"
+                    tvEarStatus.text = "Fechado (${res.eyesFramesCount}/${res.eyesFramesThreshold})"
                     tvEarStatus.setTextColor(Color.YELLOW)
                 } else {
                     tvEarStatus.text = String.format(
@@ -186,7 +194,7 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 // 2. Atualização da Caixa 2 (MAR / Boca)
                 tvMarValue.text = String.format(Locale.US, "MAR: %.2f", res.currentMar)
                 if (res.currentMar >= DrowsinessAnalyzer.MAR_THRESHOLD) {
-                    tvMarStatus.text = "Aberta (${res.mouthFramesCount}/${DrowsinessAnalyzer.MOUTH_FRAMES_THRESHOLD})"
+                    tvMarStatus.text = "Aberta (${res.mouthFramesCount}/${res.mouthFramesThreshold})"
                     tvMarStatus.setTextColor(Color.YELLOW)
                 } else {
                     tvMarStatus.text = "Normal"
@@ -220,7 +228,6 @@ class MainActivity : AppCompatActivity(), FaceLandmarkerHelper.LandmarkerListene
                 }
 
             } else {
-                // Rosto ausente / perdido
                 analyzer.reset()
                 stopAlerts()
 

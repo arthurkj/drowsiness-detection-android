@@ -1,11 +1,13 @@
 package br.com.unisinos.drowsiness
 
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 class DrowsinessAnalyzer {
 
     companion object {
+        // region Mapeamento de índices
         // Mapeamento dos 6 índices do EAR
         // [0] -> Canto externo
         // [1] -> Superior 1
@@ -22,18 +24,20 @@ class DrowsinessAnalyzer {
         // [2] -> Canto esquerdo
         // [3] -> Canto direito
         private val MOUTH_INDEX = intArrayOf(13, 14, 78, 308)
+        //endregion
 
-        // Limiares PERCLOS e amostragem de 30 FPS (0,5s)
+        // region Limiares
         const val DEFAULT_EAR_THRESHOLD = 0.21f
-        const val EYES_FRAMES_THRESHOLD = 20
+        const val ADAPTIVE_EAR_FACTOR = 0.72f // 72% do EAR de olho aberto da pessoa
+        const val MAR_THRESHOLD = 0.50f // Ponto de corte para abertura crítica da boca
+        // endregion
 
-        // Configurações do Limiar Adaptativo
-        const val CALIBRATION_FRAMES_TARGET = 90 // 90 frames (~3 segundos a 30 FPS)
-        const val ADAPTIVE_EAR_FACTOR = 0.72f     // 72% do EAR de olho aberto da pessoa
+        // region Parâmetros de tempo
+        const val EYES_DURATION_SECONDS = 0.83f
+        const val MOUTH_DURATION_SECONDS = 3f
+        const val CALIBRATION_DURATION_MS = 3000L
+        // endregion
 
-        // Limiares MAR e amostragem de 30 FPS (3s)
-        const val MAR_THRESHOLD = 0.60f // Ponto de corte para abertura crítica da boca
-        const val MOUTH_FRAMES_THRESHOLD = 90
     }
 
     // Classe DTO com resultado da análise
@@ -41,30 +45,36 @@ class DrowsinessAnalyzer {
         val averageEar: Float,
         val currentMar: Float,
         val eyesFramesCount: Int,
+        val eyesFramesThreshold: Int,
         val mouthFramesCount: Int,
+        val mouthFramesThreshold: Int,
         val isEyesAlertOn: Boolean,
         val isMouthAlertOn: Boolean,
         val isCalibrating: Boolean,
         val currentEarThreshold: Float,
-        val baseEarCalculated: Float      // EAR médio capturado (olho 100% aberto)
+        val baseEarCalculated: Float,
+        val measuredFps: Float
     )
 
-    private var eyesFramesCount = 0
-    var isEyesAlertOn = false
-        private set
-
-    // Atributos para o controle da calibração adaptativa
+    //region Variáveis de calibração
+    private var isCalibrated = false
+    private var calibrationStartTime = System.currentTimeMillis()
+    private var calibrationFrameCount = 0
     private val calibrationEarBuffer = mutableListOf<Float>()
-    var isCalibrated: Boolean = false
-        private set
-    var adaptiveEarThreshold: Float = DEFAULT_EAR_THRESHOLD
-        private set
+    // endregion
 
-    private var baseEarCalculated = DEFAULT_EAR_THRESHOLD / ADAPTIVE_EAR_FACTOR
+    // region Valores calibrados dinamicamente
+    private var baseEarCalculated = 0.29f
+    private var adaptiveEarThreshold = DEFAULT_EAR_THRESHOLD
+    private var measuredFps = 30.0f
+    private var eyesFramesThreshold = (measuredFps * EYES_DURATION_SECONDS).roundToInt()
+    private var mouthFramesThreshold = (measuredFps * MOUTH_DURATION_SECONDS).roundToInt()
+    //endregion
 
+    //region Count de quadros
+    private var eyesFramesCount = 0
     private var mouthFramesCount = 0
-    var isMouthAlertOn = false
-        private set
+    //region
 
     // Cálculo de distância euclidiana
     private fun calculateDistance(p1: NormalizedLandmark, p2: NormalizedLandmark): Float {
@@ -114,76 +124,105 @@ class DrowsinessAnalyzer {
     fun processFrames(landmarks: List<NormalizedLandmark>): ProcessResult {
         val leftEar = calculateEar(landmarks, LEFT_EYE_INDEX)
         val rightEar = calculateEar(landmarks, RIGHT_EYE_INDEX)
-        val averageEar = (leftEar + rightEar) / 2.0f
-
-        // Processamento dos Olhos
-        if (!isCalibrated) {
-            if (averageEar > 0.0f) {
-                calibrationEarBuffer.add(averageEar)
-            }
-
-            if (calibrationEarBuffer.size >= CALIBRATION_FRAMES_TARGET) {
-                val averageBaseEar = calibrationEarBuffer.average().toFloat()
-                this.baseEarCalculated = averageBaseEar
-
-                // Define o limiar individual como 72% da abertura normal do usuário
-                adaptiveEarThreshold = averageBaseEar * ADAPTIVE_EAR_FACTOR
-                isCalibrated = true
-            }
-
-            // Enquanto está calibrando, mantém os contadores zerados para não apitar sem querer
-            eyesFramesCount = 0
-            isEyesAlertOn = false
-        } else {
-            if (averageEar < adaptiveEarThreshold) {
-                this@DrowsinessAnalyzer.eyesFramesCount++
-                if (this@DrowsinessAnalyzer.eyesFramesCount >= EYES_FRAMES_THRESHOLD) {
-                    isEyesAlertOn = true
-                }
-            } else {
-                this@DrowsinessAnalyzer.eyesFramesCount = 0
-                isEyesAlertOn = false
-            }
-        }
-
-        // Processamento da boca
+        val currentEar = (leftEar + rightEar) / 2.0f
         val currentMar = calculateMar(landmarks)
 
+        //region calibração
+        if (!isCalibrated) {
+            calibrationFrameCount++
+            if (currentEar > 0.0f) {
+                calibrationEarBuffer.add(currentEar)
+            }
+
+            val elapsedMs = System.currentTimeMillis() - calibrationStartTime
+
+            // Se completou os 3 segundos de calibração inicial
+            if (elapsedMs >= CALIBRATION_DURATION_MS && calibrationFrameCount > 10) {
+                // A) Calibração de Hardware (FPS Real)
+                measuredFps = (calibrationFrameCount.toFloat() / (elapsedMs / 1000.0f))
+
+                // Recalcula os limiares de frames com base no FPS REAL do aparelho
+                eyesFramesThreshold = (measuredFps * EYES_DURATION_SECONDS).roundToInt().coerceAtLeast(5)
+                mouthFramesThreshold = (measuredFps * MOUTH_DURATION_SECONDS).roundToInt().coerceAtLeast(15)
+
+                // B) Calibração Anatômica (EAR Base)
+                val averageBaseEar = if (calibrationEarBuffer.isNotEmpty()) {
+                    calibrationEarBuffer.average().toFloat()
+                } else 0.29f
+
+                this.baseEarCalculated = averageBaseEar
+                this.adaptiveEarThreshold = averageBaseEar * ADAPTIVE_EAR_FACTOR
+                this.isCalibrated = true
+            }
+
+            return ProcessResult(
+                averageEar = currentEar,
+                currentMar = currentMar,
+                eyesFramesCount = 0,
+                eyesFramesThreshold = eyesFramesThreshold,
+                mouthFramesCount = 0,
+                mouthFramesThreshold = mouthFramesThreshold,
+                isEyesAlertOn = false,
+                isMouthAlertOn = false,
+                isCalibrating = true,
+                baseEarCalculated = baseEarCalculated,
+                currentEarThreshold = DEFAULT_EAR_THRESHOLD,
+                measuredFps = measuredFps
+            )
+        }
+        //endregion
+
+        //region Validação EAR
+        var isEyesAlertOn = false
+        if (currentEar < adaptiveEarThreshold) {
+            eyesFramesCount++
+            if (eyesFramesCount >= eyesFramesThreshold) {
+                isEyesAlertOn = true
+            }
+        } else {
+            eyesFramesCount = 0
+        }
+        //endregion
+
+        //region Validação MAR
+        var isMouthAlertOn = false
         if (currentMar >= MAR_THRESHOLD) {
             mouthFramesCount++
-            if (mouthFramesCount >= MOUTH_FRAMES_THRESHOLD) {
+            if (mouthFramesCount >= mouthFramesThreshold) {
                 isMouthAlertOn = true
             }
         } else {
             mouthFramesCount = 0
-            isMouthAlertOn = false
         }
+        //endregion
 
         return ProcessResult(
-            averageEar = averageEar,
+            averageEar = currentEar,
             currentMar = currentMar,
             eyesFramesCount = eyesFramesCount,
+            eyesFramesThreshold = eyesFramesThreshold,
             mouthFramesCount = mouthFramesCount,
+            mouthFramesThreshold = mouthFramesThreshold,
             isEyesAlertOn = isEyesAlertOn,
             isMouthAlertOn = isMouthAlertOn,
-            isCalibrating = !isCalibrated,
-            currentEarThreshold = if (isCalibrated) adaptiveEarThreshold else DEFAULT_EAR_THRESHOLD,
-            baseEarCalculated = baseEarCalculated
+            isCalibrating = false,
+            baseEarCalculated = baseEarCalculated,
+            currentEarThreshold = adaptiveEarThreshold,
+            measuredFps = measuredFps
         )
     }
 
     fun reset() {
         eyesFramesCount = 0
-        isEyesAlertOn = false
         mouthFramesCount = 0
-        isMouthAlertOn = false
     }
 
-    // Força o reinício da calibração (útil ao reiniciar os testes ou mudar de usuário)
     fun recalibrate() {
-        reset()
-        calibrationEarBuffer.clear()
-        adaptiveEarThreshold = DEFAULT_EAR_THRESHOLD
         isCalibrated = false
+        calibrationStartTime = System.currentTimeMillis()
+        calibrationFrameCount = 0
+        calibrationEarBuffer.clear()
+        eyesFramesCount = 0
+        mouthFramesCount = 0
     }
 }
